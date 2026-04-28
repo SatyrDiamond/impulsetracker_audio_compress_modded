@@ -2,7 +2,24 @@ import it214
 import numpy as np
 from external.easybinrw import easybinrw
 
-def encode_chunk(sampdata, is16, channel):
+dt_header = np.dtype([
+	('num_samples', '<I'), 
+	('bits', '<B'), 
+	('hz', '<B'), 
+	('channels', '<B'), 
+	])
+
+dt_chanpart = np.dtype([
+	('type', '<B'), 
+	('pos', '<I'), 
+	('mix_from_chan', '<B'), 
+	('size', '<I'), 
+	])
+# ================================================== ENCODE ==================================================
+
+ENABLE_MIXING = 1
+
+def encode_chunk(sampdata, is16):
 	datal = []
 
 	datal.append([0, sampdata])
@@ -22,37 +39,149 @@ def encode_chunk(sampdata, is16, channel):
 
 	out_type, out_data = datal[bestc]
 
-	ebrw_writestr = easybinrw.binwrite()
-	ebrw_writestr.int_u8(out_type + (channel<<4))
-	ebrw_writestr.int_u16(len(sampdata))
-	ebrw_writestr.int_u16(len(out_data))
-	ebrw_writestr.raw(out_data)
-	
 	if not out_type: print('E', out_type, len(sampdata), len(out_data))
 
-	return ebrw_writestr.getvalue()
+	return out_type, out_data
 
-def decode_chunk(ebrw_readstr, is16):
-	out_type = ebrw_readstr.int_u8()
-	sampdata = ebrw_readstr.int_u16()
+def encode(filename, is16, numchans):
+	ebrw_readstr = easybinrw.binread()
+	ebrw_readstr.load_file(filename)
+	num_samples = 0x1000
+	outdata = b''
 
-	channel = out_type>>4
-	out_type = out_type&15
+	total_numsamples = num_samples*numchans
 
-	data = ebrw_readstr.raw(ebrw_readstr.int_u16())
+	while ebrw_readstr.remaining():
+		print((ebrw_readstr.state.end-ebrw_readstr.remaining())/ebrw_readstr.state.end, end=' ')
+		ebrw_writestr = easybinrw.binwrite()
+		chunk_write = easybinrw.binwrite()
 
-	if not out_type: print('D', out_type, channel, sampdata, len(data))
+		sampdata = ebrw_readstr.list_int_u16(total_numsamples) if is16 else ebrw_readstr.list_int_u8(total_numsamples)
 
+		header_data = np.zeros(1, dt_header)
+		header_data['hz'] = 0
+		header_data['bits'] = 16 if is16 else 8
+		header_data['channels'] = numchans
+		header_data['num_samples'] = len(sampdata)//numchans
+		chunk_write.raw(header_data.tobytes())
+
+		outt = []
+		pos = 0
+
+		for n in range(numchans):
+			indata = sampdata[n::numchans]
+
+			mix_from_chan = 0
+
+			if is16 and ENABLE_MIXING:
+				if not n: 
+					firstaudio_data = indata
+					out_type, out_data = encode_chunk(indata.tobytes(), is16)
+				elif n==1: 
+					chan_l = np.frombuffer(firstaudio_data.tobytes(), np.int16)
+					chan_r = np.frombuffer(indata.tobytes(), np.int16)
+					combmix = chan_r-chan_l
+					oout_type, oout_data = encode_chunk(indata.tobytes(), is16)
+					cond1 = (min(chan_r)<min(combmix))
+					cond2 = (max(chan_r)>max(combmix))
+					if cond1 or cond2:
+						combmix = combmix.astype(np.int32)
+						cout_type, cout_data = encode_chunk(combmix.astype(np.int16).tobytes(), is16)
+
+						if len(cout_data)<len(out_data):
+							mix_from_chan = 1
+							out_type, out_data = cout_type, cout_data
+						else:
+							out_type, out_data = oout_type, oout_data
+					else:
+						out_type, out_data = oout_type, oout_data
+			else:
+				out_type, out_data = encode_chunk(indata.tobytes(), is16)
+
+
+			header_data = np.zeros(1, dt_chanpart)
+			header_data['type'] = out_type
+			header_data['pos'] = pos
+			pos += len(out_data)
+			header_data['mix_from_chan'] = mix_from_chan
+			header_data['size'] = len(out_data)
+			chunk_write.raw(header_data.tobytes())
+			outt.append(out_data)
+			print(out_type, mix_from_chan, end=' ')
+		print()
+
+		for x in outt:
+			chunk_write.raw(x)
+
+		outchunk = chunk_write.getvalue()
+		ebrw_writestr.int_u32(len(outchunk))
+		ebrw_writestr.raw(outchunk)
+		yield ebrw_writestr.getvalue()
+
+def encode_file_stereo(filename, is16, outfilename):
+	of = open(outfilename, 'wb')
+	for x in encode(filename, is16, 2):
+		of.write(x)
+	of.close()
+
+def encode_file(filename, is16, outfilename):
+	of = open(outfilename, 'wb')
+	of.write( encode(filename, True, 1) )
+	of.close()
+
+# ================================================== ENCODE ==================================================
+
+def decode_chunk(ebrw_readstr):
+	chunk_size = ebrw_readstr.int_u32()
+	startpos = ebrw_readstr.tell()
+
+	ebrw_readstr.seek(startpos)
+
+	header_data = np.frombuffer(ebrw_readstr.raw(dt_header.itemsize), dt_header)[0]
+	chan_data = np.frombuffer(ebrw_readstr.raw(dt_chanpart.itemsize*2), dt_chanpart)
+	headafterpos = ebrw_readstr.tell()
+
+	num_samples = header_data['num_samples']
+	is_16 = header_data['bits']==16
+
+	outchans = []
+	for n, chan_part in enumerate(chan_data):
+		chan_mix = chan_part['mix_from_chan']
+		print(chan_mix, chan_part['type'], end=' - ')
+
+		chanpos = headafterpos+chan_part['pos']
+		ebrw_readstr.seek(chanpos)
+		data = ebrw_readstr.raw(chan_part['size'])
+
+		auddata = decode_audio(chan_part['type'], data, num_samples, is_16)
+		auddata = np.frombuffer(auddata, dtype=(np.uint16 if is_16 else np.uint8)).copy()
+		auddata.dtype = (np.int16 if is_16 else np.int8)
+
+		outdata = np.zeros(num_samples, dtype=(np.uint16 if is_16 else np.uint8))
+		outdata[0:len(auddata)] = auddata
+
+		if chan_mix:
+			org_aud = outchans[chan_mix-1]
+			outdata[0:len(org_aud)] = outdata[0:len(org_aud)]+org_aud
+		else:
+			outdata[0:len(auddata)] = auddata
+		outchans.append(outdata)
+
+	print()
+
+	nextchunk = startpos+chunk_size
+	ebrw_readstr.seek(nextchunk)
+	return header_data, is_16, outchans
+
+def decode_audio(out_type, data, sampsize, is16):
 	if out_type==0:
-		return channel, data
+		return data
 	elif out_type==1:
-		if is16: sampdata //= 2
-		decomp = it214.IT214Decompressor(data, sampdata, is16)
+		decomp = it214.IT214Decompressor(data, sampsize, is16)
 		xdata = decomp.get_data()
-		return channel, np.array(xdata, dtype=(np.uint16 if is16 else np.uint8)).tobytes()
+		return np.array(xdata, dtype=(np.uint16 if is16 else np.uint8)).tobytes()
 	elif out_type==2:
-		if is16: sampdata //= 2
-		decomp = it214.IT214Decompressor(data, sampdata, is16)
+		decomp = it214.IT214Decompressor(data, sampsize, is16)
 		xdata = decomp.get_data()
 		base = 0
 		if is16:
@@ -65,88 +194,41 @@ def decode_chunk(ebrw_readstr, is16):
 				base += xdata[i]
 				base &= 0xFF
 				xdata[i] = base
-		return channel, np.array(xdata, dtype=(np.uint16 if is16 else np.uint8)).tobytes()
+		return np.array(xdata, dtype=(np.uint16 if is16 else np.uint8)).tobytes()
 	elif out_type==3:
-		return channel, b'\0'*sampdata
+		return b'\0'*(sampsize*2)
 	else:
 		print('unknown type', out_type)
-		return channel, b'\0'*sampdata
+		return b'\0'*sampsize
 
-def encode_stereo(filename, is16):
-	ebrw_readstr = easybinrw.binread()
-	ebrw_readstr.load_file(filename)
-	block_size = 0x1000
-	outdata = b''
-	while ebrw_readstr.remaining():
-		sampdata = ebrw_readstr.list_int_u16(block_size*2) if is16 else ebrw_readstr.list_int_u8(block_size*2)
-		outdata += encode_chunk(sampdata[0::2].tobytes(), is16, 0)
-		outdata += encode_chunk(sampdata[1::2].tobytes(), is16, 1)
-	return outdata
-
-def encode(filename, is16):
-	ebrw_readstr = easybinrw.binread()
-	ebrw_readstr.load_file(filename)
-	block_size = 0x1000
-	outdata = b''
-	while ebrw_readstr.remaining():
-		sampdata = ebrw_readstr.raw(block_size)
-		outdata += encode_chunk(sampdata, is16, 0)
-	return outdata
-
-def decode(filename, is16):
+def decode(filename, channels):
 	ebrw_readstr = easybinrw.binread()
 	ebrw_readstr.load_file(filename)
 	outdata = b''
 	while ebrw_readstr.remaining(): 
-		chan, chunk = decode_chunk(ebrw_readstr, is16)
-		if not chan: outdata += chunk
+		print(ebrw_readstr.remaining(), end=' ')
+		header_data, is_16, chunk = decode_chunk(ebrw_readstr)
+
+		numchans = header_data['channels']
+		num_samples = header_data['num_samples']
+		current_arr = np.zeros(num_samples*numchans, dtype=(np.uint16 if is_16 else np.uint8))
+
+		for chan in range(numchans):
+			chunkdata = chunk[chan]
+			current_arr[chan:len(chunkdata)*2:2] = chunkdata
+		outdata += current_arr.tobytes()
+
+		#if len(chunk)==2:
+		#	current_arr[0:len(chunk[0])*2:2] = chunk[0]
+		#	current_arr[1:len(chunk[1])*2:2] = chunk[1]
+		#	outdata += current_arr.tobytes()
 	return outdata
-
-def decode_stereo(filename, is16):
-	ebrw_readstr = easybinrw.binread()
-	ebrw_readstr.load_file(filename)
-	outdata = b''
-	current_arr = None
-	while ebrw_readstr.remaining(): 
-		chan, chunk = decode_chunk(ebrw_readstr, is16)
-		numsamples = len(chunk)
-		if is16: 
-			numsamples //= 2
-			if len(chunk)%2: chunk = chunk[0:-1]
-		if chan == 0:
-			if current_arr is not None: outdata += current_arr.tobytes()
-			current_arr = np.zeros(numsamples*2, dtype=(np.uint16 if is16 else np.uint8))
-			td = np.frombuffer(chunk, dtype=(np.uint16 if is16 else np.uint8))
-			current_arr[0::2] = td
-			current_arr[1::2] = current_arr[0::2]
-
-		if chan == 1:
-			if current_arr is not None: 
-				td = np.frombuffer(chunk, dtype=(np.uint16 if is16 else np.uint8))
-				current_arr[1:len(chunk):2] = td[:len(current_arr[1:len(chunk):2])]
-	if current_arr is not None: outdata += current_arr.tobytes()
-	return outdata
-
-def encode_file_stereo(filename, is16, outfilename):
-	of = open(outfilename, 'wb')
-	of.write( encode_stereo(filename, True) )
-	of.close()
-
-def encode_file(filename, is16, outfilename):
-	of = open(outfilename, 'wb')
-	of.write( encode(filename, True) )
-	of.close()
-
-def decode_file_stereo(filename, is16, outfilename):
-	od = decode_stereo(filename, True)
-	of = open(outfilename, 'wb')
-	of.write(od)
 
 def decode_file(filename, is16, outfilename):
-	od = decode(filename, True)
+	od = decode(filename, 2)
 	of = open(outfilename, 'wb')
 	of.write(od)
 
-encode_file_stereo('input.raw', True, 'out.it215')
-decode_file_stereo('out.it215', True, 'outdec.pcm')
+#encode_file_stereo('test.raw', True, 'out.it215')
+#decode_file_stereo('out.it215', True, 'outdec.pcm')
 decode_file('out.it215', True, 'outdec_mono.pcm')
