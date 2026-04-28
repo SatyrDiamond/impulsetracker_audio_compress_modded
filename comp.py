@@ -126,7 +126,8 @@ def encode_file_stereo(filename, is16, outfilename):
 
 def encode_file(filename, is16, outfilename):
 	of = open(outfilename, 'wb')
-	of.write( encode(filename, True, 1) )
+	for x in encode(filename, is16, 1):
+		of.write(x)
 	of.close()
 
 # ================================================== ENCODE ==================================================
@@ -138,7 +139,8 @@ def decode_chunk(ebrw_readstr):
 	ebrw_readstr.seek(startpos)
 
 	header_data = np.frombuffer(ebrw_readstr.raw(dt_header.itemsize), dt_header)[0]
-	chan_data = np.frombuffer(ebrw_readstr.raw(dt_chanpart.itemsize*2), dt_chanpart)
+	numchans = header_data['channels']
+	chan_data = np.frombuffer(ebrw_readstr.raw(dt_chanpart.itemsize*numchans), dt_chanpart)
 	headafterpos = ebrw_readstr.tell()
 
 	num_samples = header_data['num_samples']
@@ -209,19 +211,15 @@ def decode(filename, channels):
 		print(ebrw_readstr.remaining(), end=' ')
 		header_data, is_16, chunk = decode_chunk(ebrw_readstr)
 
-		numchans = header_data['channels']
-		num_samples = header_data['num_samples']
+		numchans = int(header_data['channels'])
+		num_samples = int(header_data['num_samples'])
 		current_arr = np.zeros(num_samples*numchans, dtype=(np.uint16 if is_16 else np.uint8))
 
 		for chan in range(numchans):
 			chunkdata = chunk[chan]
-			current_arr[chan:len(chunkdata)*2:2] = chunkdata
+			current_arr[chan:len(chunkdata)*numchans:numchans] = chunkdata
 		outdata += current_arr.tobytes()
 
-		#if len(chunk)==2:
-		#	current_arr[0:len(chunk[0])*2:2] = chunk[0]
-		#	current_arr[1:len(chunk[1])*2:2] = chunk[1]
-		#	outdata += current_arr.tobytes()
 	return outdata
 
 def decode_file(filename, is16, outfilename):
@@ -230,5 +228,7 @@ def decode_file(filename, is16, outfilename):
 	of.write(od)
 
 #encode_file_stereo('test.raw', True, 'out.it215')
-#decode_file_stereo('out.it215', True, 'outdec.pcm')
+encode_file('test.raw', True, 'out.it215')
+
+
 decode_file('out.it215', True, 'outdec_mono.pcm')
