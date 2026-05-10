@@ -4,7 +4,7 @@ from external.easybinrw import easybinrw
 from external.easybinrw import riff_chunks
 
 dt_header = np.dtype([
-	('num_samples', '<I'), 
+	('num_samples', '<H'), 
 	('bits', '<B'), 
 	('hz', '<B'), 
 	('channels', '<B'), 
