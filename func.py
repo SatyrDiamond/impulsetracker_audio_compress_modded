@@ -85,8 +85,8 @@ def encode_ebrw(ebrw_readstr, is16, numchans, num_samples):
 					firstaudio_data = indata
 					out_type, out_data = encode_chunk(indata.tobytes(), is16)
 				elif n==1: 
-					chan_l = np.frombuffer(firstaudio_data.tobytes(), np.int16)
 					chan_r = np.frombuffer(indata.tobytes(), np.int16)
+					chan_l = np.frombuffer(firstaudio_data.tobytes(), np.int16)[0:len(chan_r)]
 					combmix = chan_r-chan_l
 					oout_type, oout_data = encode_chunk(indata.tobytes(), is16)
 					cond1 = (min(chan_r)<min(combmix))
