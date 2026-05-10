@@ -5,14 +5,11 @@ import struct
 
 DECOMPRESS_IT214 = True
 
-# types are "recursive crater", "abstract fillin", "fillin", and "crater".
+# types are "recursive crater", "fillin", and "crater".
 IT214_ALGO_SELECT = "recursive crater"
 
 # this should hopefully speed up what's been done.
 IT214_ALGO_RECURSIVE_CRATER = IT214_ALGO_SELECT == "recursive crater"
-
-# this has been an experiment and is currently very inefficient. don't use it.
-IT214_ALGO_ABSTRACT_FILLIN = IT214_ALGO_SELECT == "abstract fillin"
 
 # if you want to, try this algorithm. about half the time, it beats crater.
 IT214_ALGO_FILLIN = IT214_ALGO_SELECT == "fillin"
@@ -52,6 +49,7 @@ IT214_WIDTHCHANGESIZE = [4,5,6,7,8,9,7,8,9,10,11,12,13,14,15,16,17]
 
 class IT214Compressor:
 	def __init__(self, data, is16, is215):
+		is215 = int(is215)
 		# Probably the only IT214 compressor in the world to handle stereo samples.
 		# (ok i can just about guarantee that Storlek has something)
 		
@@ -85,8 +83,7 @@ class IT214Compressor:
 			self.clamp_unsigned = lambda x : (x&0xFF)
 			for i in range(self.base_length): self.data.append(ord_shim(data[(i)]))
 
-		self.deltafy()
-		if is215: self.deltafy()
+		for _ in range(is215+1): self.deltafy()
 		
 		if IT214_ALGO_RECURSIVE_CRATER: self.squish_recursive()
 		else: self.squish()
@@ -185,104 +182,7 @@ class IT214Compressor:
 		# initialise bit width table with initial values
 		bwt = [self.dwidth for i in range(self.base_length)]
 		
-		if IT214_ALGO_ABSTRACT_FILLIN: # "Abstract fillin" algorithm
-			# precrater then analyse
-			if DEBUGPRINT: print("building craters")
-			for i in range(self.base_length):
-				for width in range(self.dwidth):
-					if self.data[i] >= self.lowertab[width] and self.data[i] <= self.uppertab[width]:
-						bwt[i] = width+1
-						break
-					
-					assert width != self.dwidth-1
-			
-			if DEBUGPRINT: print("analysing cratery")
-			l = []
-			w = self.dwidth
-			c = 0
-			n = 0
-			for v in bwt:
-				if w != v:
-					l.append((w,c,n))
-					w = v
-					c = IT214_WIDTHCHANGESIZE[w-1]
-					if w <= 6 and self.is16:
-						c += 1
-					n = 0
-				
-				n += 1
-			
-			l.append((w,c,n))
-			
-			if DEBUGPRINT: print("removing crap cratery")
-			k = True
-			r = 0
-			while k:
-				k = False
-				if DEBUGPRINT: print(len(l))
-				if DEBUGPRINT: print("iteration", r+1)
-				r += 1
-				
-				i = len(l)-1
-				while i >= 1:
-					wl,cl,nl = l[i-1]
-					wm,cm,nm = l[i]
-					
-					# action cost for keep / merge
-					ak = wl*nl + cl + wm*nm + cm
-					am = wl*(nl+nm) + cl
-					act = 0 # middle -> left
-					
-					# target width for merge
-					tw = wl
-					tn = nl+nm
-					
-					if i == len(l)-1:
-						ak -= cm
-						am -= cl
-					else:
-						wr,cr,nr = l[i+1]
-						if wr == wl:
-							act = 1 # right -> middle -> left base
-							am -= cl
-							tn = nl+nm+nr
-						else:
-							amr = cl + wr*(nl+nm)
-							if amr < am and wl > wm:
-								act = 2 # right base -> middle
-								tm = l[i+1][0]
-								tw = wm
-								tn = nm+nr
-					
-					
-					if am < ak and tw > wm:
-						if act == 0:
-							l = l[:i-1] + [(tw,self.get_width_change_size(tw),tn)] + l[i+1:]
-						elif act == 1:
-							l = l[:i-1] + [(tw,self.get_width_change_size(tw),tn)] + l[i+2:]
-						elif act == 2:
-							l = l[:i] + [(tw,self.get_width_change_size(tw),tn)] + l[i+2:]
-						else:
-							raise Exception("EDOOFUS this should never happen")
-						
-						i -= 2
-						k = True
-					else:
-						i -= 1
-					
-			
-			if DEBUGPRINT: print(len(l))
-			
-			if DEBUGPRINT: print("recreating bit width table")
-			w,c,n = l.pop(0)
-			for i in range(len(bwt)):
-				if n == 0:
-					w,c,n = l.pop(0)
-				
-				bwt[i] = w
-				n -= 1
-			
-		elif IT214_ALGO_FILLIN: # "Fill in" algorithm
+		if IT214_ALGO_FILLIN: # "Fill in" algorithm
 			# precrater then raise craters
 			if DEBUGPRINT: print("building craters")
 			for i in range(self.base_length):
@@ -580,6 +480,20 @@ class IT214Decompressor:
 		
 		return v
 
+def decode_undelta(xdata, is16):
+	base = 0
+	if is16:
+		for i in range(len(xdata)):
+			base += xdata[i]
+			base &= 0xFFFF
+			xdata[i] = base
+	else:
+		for i in range(len(xdata)):
+			base += xdata[i]
+			base &= 0xFF
+			xdata[i] = base
+
+
 def quick_decompress(sampdata, is16, is215):
 	outdata = []
 	xlen = len(sampdata)
@@ -593,18 +507,7 @@ def quick_decompress(sampdata, is16, is215):
 		decomp = IT214Decompressor(ebrw_readstr.raw(blkcomplen), xlen, is16)
 		if DECOMPRESS_IT214:
 			xdata = decomp.get_data()
-			if is215:
-				base = 0
-				if is16:
-					for i in range(len(xdata)):
-						base += xdata[i]
-						base &= 0xFFFF
-						xdata[i] = base
-				else:
-					for i in range(len(xdata)):
-						base += xdata[i]
-						base &= 0xFF
-						xdata[i] = base
+			if is215: decode_undelta(xdata, is16)
 			
 			outdata += xdata
 		
